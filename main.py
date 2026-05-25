@@ -15,14 +15,20 @@ lines = cv2.HoughLinesP(
     np.pi/180,
     50,
     minLineLength=50,
-    maxLineGap=300
+    maxLineGap=10
 )
 
 if lines is not None:
-    for line in lines:
 
-        x1,y1,x2,y2 = line[0]
-        cv2.line(img, (x1,y1) , (x2,y2), (0,255,0) , 2)
+    longest_line = max (lines, key=lambda 1:
+        np.sqrt((1[0][2]-1[0][0])**2 + (1[0][3]-1[0][1])**2)
+    )
+    x1,y1,x2,y2 = longest_line[0]
+    cv2.line(img, (x1,y1) , (x2,y2), (0,255,0) , 2)
+
+    angle = math.degrees(math.atan2(y2-y1, x2-x1))
+
+    print("Needle Angle:", angle)
         
 cv2.imshow("Needle Detection", img)
 
