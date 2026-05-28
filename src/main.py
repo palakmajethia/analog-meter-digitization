@@ -19,7 +19,12 @@ if lines is not None:
     cv2.line(line_img, (x1,y1), (x2,y2), (255,0,0), 2)
 
     print ("Needle Angle:" , angle)
+
     print ("Status:" , status)
+
+cv2.imwrite("outputs/final_output.jpg", img)
+
+cv2.imshow("Final Output", img)
 
 cv2.waitKey(0)
 
