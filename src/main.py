@@ -1,31 +1,50 @@
 import cv2
 
-from preprocessing import preprocessing_image
+from preprocessing import preprocess_image
 from needle_detection import detect_needle
 from angle_calculation import calculate_angle
 from alert_logic import classify_range
 
-img = cv2.imread("images/test.jpg")
-gray, blur, edges = preprocessing_image(img)
-line = detect_needle(edges)
+cap = cv2.VideoCapture("videos/gauge.mp4")
 
-if lines is not None:
+while True:
 
-    angle = calculate_angle(line)
-    status = classify_range(angle)
+    ret, frame = cap.read()
 
-    x1, y1, x2, y2 = line[0]
+    if not ret:
+        break
 
-    cv2.line(line_img, (x1,y1), (x2,y2), (255,0,0), 2)
+    gray, blur, edges = preprocess_image(frame)
 
-    print ("Needle Angle:" , angle)
+    line = detect_needle(edges)
 
-    print ("Status:" , status)
+    if line is not None:
 
-cv2.imwrite("outputs/final_output.jpg", img)
+        angle = calculate_angle(line)
 
-cv2.imshow("Final Output", img)
+        normalized_angle = angle + 90
 
-cv2.waitKey(0)
+        status = classify_range(normalized_angle)
+
+        x1, y1, x2, y2 = line[0]
+
+        cv2.line(frame, (x1,y1), (x2,y2), (0,255,0), 2)
+
+        cv2.putText(
+            frame,
+            status,
+            (30,30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0,0,255),
+            2
+        )
+
+    cv2.imshow("Gauge Monitor", frame)
+
+    if cv2.waitKey(30) & 0xFF == ord('q'):
+        break
+
+cap.release()
 
 cv2.destroyAllWindows()
