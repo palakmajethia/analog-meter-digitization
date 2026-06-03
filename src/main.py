@@ -1,106 +1,150 @@
 import cv2
+import numpy as np
+import math
 
 from preprocessing import preprocess_image
 from needle_detection import detect_needle
-from angle_calculation import calculate_angle
 from alert_logic import classify_range
 
 
-# VIDEO PATH
+# =========================
+# CALIBRATION (KEEP SAME)
+# =========================
+EMPTY_ANGLE = 0
+FULL_ANGLE = 180
+
+
+def calculate_tip_angle(line, frame_shape):
+
+    x1, y1, x2, y2 = line[0]
+
+    h, w = frame_shape[:2]
+    cx, cy = w // 2, h // 2
+
+    # pick needle tip (farther from center)
+    d1 = (x1 - cx) ** 2 + (y1 - cy) ** 2
+    d2 = (x2 - cx) ** 2 + (y2 - cy) ** 2
+
+    if d1 > d2:
+        tx, ty = x1, y1
+    else:
+        tx, ty = x2, y2
+
+    angle = math.degrees(math.atan2(cy - ty, tx - cx))
+
+    if angle < 0:
+        angle += 180
+
+    return angle
+
+
+def angle_to_percent(angle):
+
+    percent = (angle - EMPTY_ANGLE) / (FULL_ANGLE - EMPTY_ANGLE) * 100
+    return max(0, min(100, percent))
+
+
+# =========================
+# VIDEO
+# =========================
+
 cap = cv2.VideoCapture("videos/gauge.mp4")
 
-# Check video opened
 if not cap.isOpened():
     print("Error opening video")
     exit()
 
-frame_count = 0
+last_line = None
+angle_history = []
 
 while True:
 
     ret, frame = cap.read()
-
-    # Video ended
     if not ret:
         print("No more frames. Exiting...")
         break
 
-    frame_count += 1
-
-    # Skip frames for speed
-    if frame_count % 5 != 0:
-        continue
-
-    # Resize frame
     frame = cv2.resize(frame, (800, 600))
 
-    # Preprocessing
-    gray, blur, edges = preprocess_image(frame)
+    _, _, edges = preprocess_image(frame)
 
-    # Detect needle line
+    # =========================
+    # FIX 1: fallback line
+    # =========================
     line = detect_needle(edges)
 
-    print("Detected Line:", line)
-
     if line is not None:
-
-        x1, y1, x2, y2 = line[0]
-
-        # Draw detected line
-        cv2.line(
-            frame,
-            (x1, y1),
-            (x2, y2),
-            (0, 255, 0),
-            3
-        )
-
-        # Calculate angle
-        angle = calculate_angle(line)
-
-        print("Angle:", angle)
-
-        # Normalize angle
-        normalized_angle = angle + 90
-
-        # Classify status
-        status = classify_range(normalized_angle)
-
-        print("Status:", status)
-
-        # Put status text
-        cv2.putText(
-            frame,
-            status,
-            (30, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 0, 255),
-            2
-        )
-
+        last_line = line
     else:
-        cv2.putText(
-            frame,
-            "NO NEEDLE DETECTED",
-            (30, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 0, 255),
-            2
-        )
+        line = last_line
 
-    # SHOW WINDOWS
+    # If still nothing → skip frame safely
+    if line is None:
+        cv2.putText(frame, "NO NEEDLE DETECTED",
+                    (30, 40), cv2.FONT_HERSHEY_SIMPLEX,
+                    1, (0, 0, 255), 2)
+
+        cv2.imshow("Gauge Monitor", frame)
+        cv2.imshow("Edges", edges)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+        continue
+
+    # =========================
+    # draw line
+    # =========================
+    x1, y1, x2, y2 = line[0]
+    cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
+
+    # =========================
+    # angle calculation
+    # =========================
+    angle = calculate_tip_angle(line, frame.shape)
+
+    # =========================
+    # FIX 2: smoothing (IMPORTANT)
+    # =========================
+    angle_history.append(angle)
+
+    if len(angle_history) > 5:
+        angle_history.pop(0)
+
+    smooth_angle = np.mean(angle_history)
+
+    # =========================
+    # conversion
+    # =========================
+    percent = angle_to_percent(smooth_angle)
+    status = classify_range(percent)
+
+    print(f"Angle: {smooth_angle:.2f} | Percent: {percent:.1f} | Status: {status}")
+
+    # =========================
+    # display
+    # =========================
+    cv2.putText(frame,
+                f"{status} | {percent:.1f}%",
+                (30, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 0, 255),
+                2)
+
+    cv2.putText(frame,
+                f"Angle: {smooth_angle:.1f}",
+                (30, 80),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (255, 255, 0),
+                2)
+
     cv2.imshow("Gauge Monitor", frame)
     cv2.imshow("Edges", edges)
 
-    # PRESS Q TO EXIT
     if cv2.waitKey(1) & 0xFF == ord('q'):
-        print("Stopped by user.")
         break
 
-# Cleanup
+
 cap.release()
 cv2.destroyAllWindows()
-
-print("Program Ended.")
+print("Program Ended")
