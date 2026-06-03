@@ -4,11 +4,11 @@ import math
 
 from preprocessing import preprocess_image
 from needle_detection import detect_needle
-from alert_logic import classify_range
+from alert_logic import classify_range, get_interval
 
 
 # =========================
-# CALIBRATION (KEEP SAME)
+# CALIBRATION
 # =========================
 EMPTY_ANGLE = 0
 FULL_ANGLE = 180
@@ -21,7 +21,6 @@ def calculate_tip_angle(line, frame_shape):
     h, w = frame_shape[:2]
     cx, cy = w // 2, h // 2
 
-    # pick needle tip (farther from center)
     d1 = (x1 - cx) ** 2 + (y1 - cy) ** 2
     d2 = (x2 - cx) ** 2 + (y2 - cy) ** 2
 
@@ -68,9 +67,6 @@ while True:
 
     _, _, edges = preprocess_image(frame)
 
-    # =========================
-    # FIX 1: fallback line
-    # =========================
     line = detect_needle(edges)
 
     if line is not None:
@@ -78,7 +74,6 @@ while True:
     else:
         line = last_line
 
-    # If still nothing → skip frame safely
     if line is None:
         cv2.putText(frame, "NO NEEDLE DETECTED",
                     (30, 40), cv2.FONT_HERSHEY_SIMPLEX,
@@ -90,20 +85,11 @@ while True:
             break
         continue
 
-    # =========================
-    # draw line
-    # =========================
     x1, y1, x2, y2 = line[0]
     cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
 
-    # =========================
-    # angle calculation
-    # =========================
     angle = calculate_tip_angle(line, frame.shape)
 
-    # =========================
-    # FIX 2: smoothing (IMPORTANT)
-    # =========================
     angle_history.append(angle)
 
     if len(angle_history) > 5:
@@ -111,17 +97,12 @@ while True:
 
     smooth_angle = np.mean(angle_history)
 
-    # =========================
-    # conversion
-    # =========================
     percent = angle_to_percent(smooth_angle)
     status = classify_range(percent)
 
-    print(f"Angle: {smooth_angle:.2f} | Percent: {percent:.1f} | Status: {status}")
+    lower, upper = get_interval(percent)
+    print(f"Angle: {smooth_angle:.2f} | Percent: {percent:.1f} | Interval: {lower}-{upper} | Status: {status}")
 
-    # =========================
-    # display
-    # =========================
     cv2.putText(frame,
                 f"{status} | {percent:.1f}%",
                 (30, 40),
