@@ -38,7 +38,6 @@ def calculate_tip_angle(line, frame_shape):
 
 
 def angle_to_percent(angle):
-
     percent = (angle - EMPTY_ANGLE) / (FULL_ANGLE - EMPTY_ANGLE) * 100
     return max(0, min(100, percent))
 
@@ -55,6 +54,9 @@ if not cap.isOpened():
 
 last_line = None
 angle_history = []
+last_percent = None
+low_streak = 0
+LOW_STREAK_NEEDED = 5
 
 while True:
 
@@ -78,7 +80,6 @@ while True:
         cv2.putText(frame, "NO NEEDLE DETECTED",
                     (30, 40), cv2.FONT_HERSHEY_SIMPLEX,
                     1, (0, 0, 255), 2)
-
         cv2.imshow("Gauge Monitor", frame)
         cv2.imshow("Edges", edges)
         if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -98,9 +99,31 @@ while True:
     smooth_angle = np.mean(angle_history)
 
     percent = angle_to_percent(smooth_angle)
-    status = classify_range(percent)
+
+    # Sudden jump filter
+    if last_percent is not None and abs(percent - last_percent) > 20:
+        cv2.imshow("Gauge Monitor", frame)
+        cv2.imshow("Edges", edges)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+        continue
+
+    last_percent = percent
+    raw_status = classify_range(percent)
+
+    # Consecutive LOW check
+    if raw_status == "LOW ALERT":
+        low_streak += 1
+    else:
+        low_streak = 0
+
+    if low_streak >= LOW_STREAK_NEEDED:
+        status = "LOW ALERT"
+    else:
+        status = "NORMAL"
 
     lower, upper = get_interval(percent)
+
     print(f"Angle: {smooth_angle:.2f} | Percent: {percent:.1f} | Interval: {lower}-{upper} | Status: {status}")
 
     cv2.putText(frame,
@@ -125,14 +148,12 @@ while True:
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
+    # Jab fuel critically low ho tab band karo
+    if status == "LOW ALERT" and percent < 30:
+        print("Fuel critically low. Stopping monitor.")
+        break
+
 
 cap.release()
 cv2.destroyAllWindows()
-
-if angle_history:
-    last_angle = np.mean(angle_history)
-    last_percent = angle_to_percent(last_angle)
-    last_status = classify_range(last_percent)
-    print(f"\nFinal Reading → Percent: {last_percent:.1f}% | Status: {last_status}")
-
 print("Program Ended")
