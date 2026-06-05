@@ -10,8 +10,8 @@ from alert_logic import classify_range, get_interval
 # =========================
 # CALIBRATION
 # =========================
-EMPTY_ANGLE = 0
-FULL_ANGLE = 180
+EMPTY_ANGLE = 23
+FULL_ANGLE = 148
 
 
 def calculate_tip_angle(line, frame_shape):
@@ -92,7 +92,7 @@ while True:
 
     angle_history.append(angle)
 
-    if len(angle_history) > 5:
+    if len(angle_history) > 10:
         angle_history.pop(0)
 
     smooth_angle = np.mean(angle_history)
