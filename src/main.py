@@ -128,4 +128,11 @@ while True:
 
 cap.release()
 cv2.destroyAllWindows()
+
+if angle_history:
+    last_angle = np.mean(angle_history)
+    last_percent = angle_to_percent(last_angle)
+    last_status = classify_range(last_percent)
+    print(f"\nFinal Reading → Percent: {last_percent:.1f}% | Status: {last_status}")
+
 print("Program Ended")
