@@ -57,6 +57,7 @@ angle_history = []
 last_percent = None
 low_streak = 0
 LOW_STREAK_NEEDED = 5
+seen_low = False
 
 while True:
 
@@ -100,7 +101,6 @@ while True:
 
     percent = angle_to_percent(smooth_angle)
 
-    # Sudden jump filter
     if last_percent is not None and abs(percent - last_percent) > 20:
         cv2.imshow("Gauge Monitor", frame)
         cv2.imshow("Edges", edges)
@@ -111,13 +111,15 @@ while True:
     last_percent = percent
     raw_status = classify_range(percent)
 
-    # Consecutive LOW check
     if raw_status == "LOW ALERT":
         low_streak += 1
     else:
         low_streak = 0
 
     if low_streak >= LOW_STREAK_NEEDED:
+        status = "LOW ALERT"
+        seen_low = True
+    elif seen_low:
         status = "LOW ALERT"
     else:
         status = "NORMAL"
@@ -146,11 +148,6 @@ while True:
     cv2.imshow("Edges", edges)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-    # Jab fuel critically low ho tab band karo
-    if status == "LOW ALERT" and percent < 30:
-        print("Fuel critically low. Stopping monitor.")
         break
 
 
