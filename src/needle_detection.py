@@ -32,7 +32,7 @@ def detect_needle(edges):
 
         length = math.hypot(x2 - x1, y2 - y1)
 
-        if length < 60:
+        if length < 130:
             continue
 
         mid_x = (x1 + x2) // 2

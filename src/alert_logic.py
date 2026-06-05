@@ -6,6 +6,6 @@ def get_interval(percent, major_step=20):
 
 
 def classify_range(percent):
-    if percent < 20:
+    if percent < 25:
         return "LOW ALERT"
     return "NORMAL"
