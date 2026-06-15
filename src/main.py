@@ -2,77 +2,123 @@ import cv2
 import numpy as np
 import math
 
-from preprocessing     import preprocess_image
+from preprocessing import preprocess_image, set_background
 from needle_detection  import detect_needle
 from angle_calculation import calculate_tip_angle, get_pivot
-from gauge_mapping     import angle_to_percent, calibrate_from_angles
+from gauge_mapping import angle_to_percent, calibrate_from_angles, auto_detect_scale_from_frame
 from alert_logic       import classify_range, get_interval
 
+# =========================
+# SYSTEM CONFIGURATION
+# =========================
+# Toggle this depending on the physical gauge you are deploying the camera on.
+# "color" = Red, Blue, or Green needles (Uses Saturation logic)
+# "black" = Classic industrial black needles on white dials (Uses Luminance logic)
+# =========================
+# SYSTEM CONFIGURATION
+# =========================
+print("\n" + "="*40)
+print("  INDUSTRIAL GAUGE DIGITIZER INITIALIZATION  ")
+print("="*40)
+print("Select target gauge profile:")
+print("  [1] Colored Needle (Red/Blue/Green)")
+print("  [2] Industrial Black Needle")
+
+while True:
+    choice = input("\nEnter 1 or 2: ")
+    if choice == '1':
+        GAUGE_MODE = "color"
+        break
+    elif choice == '2':
+        GAUGE_MODE = "black"
+        break
+    else:
+        print("Invalid choice. Please enter 1 or 2.")
+print(f"-> System booting in {GAUGE_MODE.upper()} mode...\n")
+
+
 
 # =========================
 # AUTO-CALIBRATION
 # =========================
 
-# =========================
-# AUTO-CALIBRATION
-# =========================
+def calibrate(cap, target_mode):
+    print(f"[CAL] Scanning live webcam. SWEEP NEEDLE NOW if possible!")
 
-def calibrate(cap):
-    """
-    Scans every 3rd frame of the video, collects all valid needle angles,
-    then delegates to gauge_mapping.calibrate_from_angles() for the
-    p5/p95 robust range. Resets video to frame 0 when done.
-    """
-    print("[CAL] Scanning full video to find needle range...")
-
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    all_angles   = []
-    frame_idx    = 0
+    all_angles = []
+    raw_frames = []
+    frame_idx  = 0
+    max_cal_frames = 150
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
+
         if frame_idx % 3 == 0:
             frame = cv2.resize(frame, (800, 600))
-            
-            # FIXED: Catching the single 2D binary matrix instead of unpacking 3 items
-            edges = preprocess_image(frame)
-            
-            # FIXED: Unpacking the new 3-element tuple returned by detect_needle
+            raw_frames.append(frame.copy())
+
+            edges = preprocess_image(frame, mode=target_mode)
             line, status, _ = detect_needle(edges)
-            
+
             if status == "HEALTHY" and line is not None:
                 all_angles.append(calculate_tip_angle(line, frame.shape))
+
+            cv2.putText(edges,
+                f"CALIBRATING... Sweep needle! ({frame_idx}/{max_cal_frames})",
+                (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, 255, 2)
+            cv2.imshow("Calibration Preview", edges)
+            cv2.waitKey(1)
+
         frame_idx += 1
+        if frame_idx >= max_cal_frames:
+            break
 
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    cv2.destroyWindow("Calibration Preview")
 
-    if not all_angles:
-        print("[ERROR] Calibration failed: No healthy needle signatures found in stream.")
-        return 0, 360
+    if len(raw_frames) >= 20:
+        set_background(raw_frames)
 
-    empty_angle, full_angle = calibrate_from_angles(all_angles)
+    # ── Decide which calibration path to take ─────────────────────────────
+    needle_range = 0.0
+    empty_angle  = None
+    full_angle   = None
 
-    # --- THE MISSING SWAP LOGIC ---
-    # For a standard gauge, Empty is on the left (Higher Angle) and Full is on the right (Lower Angle)
-    if empty_angle < full_angle:
-        empty_angle, full_angle = full_angle, empty_angle
-    # ------------------------------
+    if len(all_angles) >= 10:
+        e, f        = calibrate_from_angles(all_angles)
+        needle_range = abs(f - e)
 
-    print(f"[CAL] Scanned {len(all_angles)} readings from {total_frames} frames.")
-    print(f"[CAL] EMPTY (p5)  = {empty_angle:.2f} deg")
-    print(f"[CAL] FULL  (p95) = {full_angle:.2f} deg")
-    return empty_angle, full_angle
+        if needle_range >= 20:
+            # ── PATH A: Needle moved enough — use motion calibration ───────
+            print(f"[CAL] PATH A: Motion calibration succeeded. Range={needle_range:.1f}°")
+            empty_angle, full_angle = e, f
+        else:
+            print(f"[CAL] Needle range too small ({needle_range:.1f}°) — trying dial detection.")
 
-    print(f"[CAL] Scanned {len(all_angles)} readings from {total_frames} frames.")
-    print(f"[CAL] EMPTY (p5)  = {empty_angle:.2f} deg")
-    print(f"[CAL] FULL  (p95) = {full_angle:.2f} deg")
+    if empty_angle is None:
+        # ── PATH B: Static gauge — read scale from tick mark arc ──────────
+        print("[CAL] PATH B: Attempting static dial scale detection...")
+        
+        # Use the clearest frame (middle of calibration window)
+        best_frame = raw_frames[len(raw_frames) // 2]
+        result     = auto_detect_scale_from_frame(best_frame)
+
+        if result is not None:
+            empty_angle, full_angle = result
+            print(f"[CAL] PATH B succeeded. EMPTY={empty_angle:.1f}° FULL={full_angle:.1f}°")
+        else:
+            # ── PATH C: Nothing worked — use safe defaults ─────────────────
+            print("[CAL] PATH B failed. Using geometric defaults (210° → 330°).")
+            print("[CAL] These defaults assume a standard semicircular gauge.")
+            empty_angle, full_angle = 210.0, 330.0
+
+    print(f"[CAL] Final: EMPTY={empty_angle:.2f}  FULL={full_angle:.2f}")
     return empty_angle, full_angle
 
 
 # =========================
-# DASHBOARD
+# DASHBOARD (UI Code Remains the Same)
 # =========================
 
 DASH_W, DASH_H = 500, 320
@@ -86,14 +132,12 @@ C_NEEDLE    = (255, 255, 255)
 C_TEXT      = (220, 220, 220)
 C_DIM       = (120, 120, 120)
 
-
 def arc_color(percent):
     if percent < 20:
         return C_ARC_ALERT
     elif percent < 40:
         return C_ARC_WARN
     return C_ARC_FILL
-
 
 def draw_dashboard(percent, smooth_angle, status, empty_angle, full_angle):
     dash = np.full((DASH_H, DASH_W, 3), C_BG, dtype=np.uint8)
@@ -111,11 +155,9 @@ def draw_dashboard(percent, smooth_angle, status, empty_angle, full_angle):
     arc_start = min(oc_empty, oc_full)
     arc_end   = max(oc_empty, oc_full)
 
-    # Background track
     cv2.ellipse(dash, (cx, cy), (radius, radius),
                 0, arc_start, arc_end, C_ARC_TRACK, thickness)
 
-    # Filled arc — grows from EMPTY side
     sweep = arc_end - arc_start
     fill  = sweep * (percent / 100.0)
     if fill > 0.5:
@@ -128,7 +170,6 @@ def draw_dashboard(percent, smooth_angle, status, empty_angle, full_angle):
                         0, arc_end - fill, arc_end,
                         arc_color(percent), thickness)
 
-    # Needle
     rad        = math.radians(smooth_angle)
     needle_len = radius - thickness - 8
     nx = int(cx - needle_len * math.cos(rad))
@@ -136,7 +177,6 @@ def draw_dashboard(percent, smooth_angle, status, empty_angle, full_angle):
     cv2.line(dash, (cx, cy), (nx, ny), C_NEEDLE, 3, cv2.LINE_AA)
     cv2.circle(dash, (cx, cy), 7, C_NEEDLE, -1)
 
-    # E / F labels at arc endpoints
     def label_pos(our_angle, offset=22):
         r  = math.radians(our_angle)
         lx = int(cx - (radius + offset) * math.cos(r))
@@ -148,14 +188,12 @@ def draw_dashboard(percent, smooth_angle, status, empty_angle, full_angle):
     cv2.putText(dash, "E", (ex - 8, ey + 6), font, 0.75, C_ARC_ALERT, 2, cv2.LINE_AA)
     cv2.putText(dash, "F", (fx - 8, fy + 6), font, 0.75, C_ARC_FILL,  2, cv2.LINE_AA)
 
-    # Percent label
     pct_str = f"{percent:.1f}%"
     (pw, _), _ = cv2.getTextSize(pct_str, font, 1.8, 3)
     cv2.putText(dash, pct_str,
                 (cx - pw // 2, cy - 18),
                 font, 1.8, C_TEXT, 3, cv2.LINE_AA)
 
-    # Status badge
     badge_col = C_ARC_ALERT if status == "LOW ALERT" else C_ARC_FILL
     (bw, bh), _ = cv2.getTextSize(status, font, 0.75, 2)
     pad = 7
@@ -168,7 +206,6 @@ def draw_dashboard(percent, smooth_angle, status, empty_angle, full_angle):
     cv2.putText(dash, status, (bx, by),
                 font, 0.75, (255, 255, 255), 2, cv2.LINE_AA)
 
-    # Title + footer
     cv2.putText(dash, "GAUGE MONITOR",
                 (18, 26), font, 0.65, C_DIM, 1, cv2.LINE_AA)
     info = f"Angle: {smooth_angle:.1f}  |  CAL  E={empty_angle:.0f}  F={full_angle:.0f}"
@@ -182,14 +219,15 @@ def draw_dashboard(percent, smooth_angle, status, empty_angle, full_angle):
 # MAIN EXECUTION
 # =========================
 
-cap = cv2.VideoCapture("videos/gauge.mp4")
+cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 
 if not cap.isOpened():
-    print("Error: could not open video.")
+    print("Error: could not open video or webcam.")
     exit()
 
-print("[CAL] Starting auto-calibration (full video scan)...")
-EMPTY_ANGLE, FULL_ANGLE = calibrate(cap)
+print("[CAL] Starting auto-calibration (webcam scan)...")
+# Pass the Master Toggle into the calibration loop
+EMPTY_ANGLE, FULL_ANGLE = calibrate(cap, GAUGE_MODE)
 print(f"[CAL] Done.  EMPTY={EMPTY_ANGLE:.2f}  FULL={FULL_ANGLE:.2f}\n")
 
 last_line         = None
@@ -205,10 +243,8 @@ while True:
 
     frame = cv2.resize(frame, (800, 600))
     
-    # FIXED: Handling single 2D edge-map array return value
-    edges = preprocess_image(frame)
-    
-    # FIXED: Tracking structural system anomalies via the new tuple output signature
+    # PASSING THE MODE TO PREPROCESSING
+    edges = preprocess_image(frame, mode=GAUGE_MODE)
     line, anomaly_status, _ = detect_needle(edges)
 
     if anomaly_status == "HEALTHY" and line is not None:
@@ -223,7 +259,6 @@ while True:
         percent = angle_to_percent(smooth_angle, EMPTY_ANGLE, FULL_ANGLE)
         is_stale_data = False
     else:
-        # If any anomaly occurs (MISSING_OR_OBSTRUCTED or MULTIPLE_PEAKS_ANOMALY), trigger robust fallback logic
         is_stale_data = True
         if len(angle_history) > 0:
             smooth_angle = float(np.mean(angle_history))
@@ -243,7 +278,6 @@ while True:
             break
         continue
 
-    # UI Rendering Vector Math
     x1, y1, x2, y2 = active_render_line[0]
     px, py = get_pivot(frame.shape)
     d1 = (x1 - px) ** 2 + (y1 - py) ** 2
@@ -253,7 +287,6 @@ while True:
     cv2.line(frame, (px, py), (tx, ty), (0, 255, 0), 3)
     cv2.circle(frame, (px, py), 6, (0, 200, 255), -1)
 
-    # Dynamic Recovery Alert Logic
     raw_status = classify_range(percent)
     if raw_status == "LOW ALERT":
         low_streak += 1
@@ -262,7 +295,6 @@ while True:
 
     status = "LOW ALERT" if low_streak >= LOW_STREAK_NEEDED else "NORMAL"
 
-    # If the system is using fallback parameters, display the anomaly status instead of standard HEALTHY
     display_status = anomaly_status if is_stale_data else status
 
     lower, upper = get_interval(percent)
@@ -287,12 +319,5 @@ while True:
         break
 
 cap.release()
-
-print("\n" + "="*50)
-print("[HOLD] Video processing finished successfully.")
-print("[HOLD] Windows are now locked. Click inside any window and press ANY KEY to quit.")
-print("="*50)
-
-cv2.waitKey(0) 
 cv2.destroyAllWindows()
 print("Program Ended Cleanly.")
