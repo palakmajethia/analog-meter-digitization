@@ -40,7 +40,7 @@ def calibrate(cap):
             edges = preprocess_image(frame)
             
             # FIXED: Unpacking the new 3-element tuple returned by detect_needle
-            line, status, _ = detect_needle(edges)
+            line, status, _ = detect_needle(edges, frame)
             
             if status == "HEALTHY" and line is not None:
                 all_angles.append(calculate_tip_angle(line, frame.shape))
@@ -52,13 +52,18 @@ def calibrate(cap):
         print("[ERROR] Calibration failed: No healthy needle signatures found in stream.")
         return 0, 360
 
-    empty_angle, full_angle = calibrate_from_angles(all_angles)
+    p5_angle, p95_angle = calibrate_from_angles(all_angles)
 
-    # --- THE MISSING SWAP LOGIC ---
-    # For a standard gauge, Empty is on the left (Higher Angle) and Full is on the right (Lower Angle)
-    if empty_angle < full_angle:
-        empty_angle, full_angle = full_angle, empty_angle
-    # ------------------------------
+    # Determine direction from the data itself: whichever extreme the needle
+    # was measured at FIRST (start of video) is closer to one end of the gauge.
+    # We use angle_history's natural progression: needle moves from its
+    # starting position. Assume video starts near EMPTY (common for gauge
+    # demo videos) -> the angle closer to the FIRST recorded angle is EMPTY.
+    first_angle = all_angles[0]
+    if abs(first_angle - p5_angle) < abs(first_angle - p95_angle):
+        empty_angle, full_angle = p5_angle, p95_angle
+    else:
+        empty_angle, full_angle = p95_angle, p5_angle
 
     print(f"[CAL] Scanned {len(all_angles)} readings from {total_frames} frames.")
     print(f"[CAL] EMPTY (p5)  = {empty_angle:.2f} deg")
@@ -192,6 +197,11 @@ print("[CAL] Starting auto-calibration (full video scan)...")
 EMPTY_ANGLE, FULL_ANGLE = calibrate(cap)
 print(f"[CAL] Done.  EMPTY={EMPTY_ANGLE:.2f}  FULL={FULL_ANGLE:.2f}\n")
 
+REVERSE_GAUGE_DIRECTION = True
+if REVERSE_GAUGE_DIRECTION:
+    EMPTY_ANGLE, FULL_ANGLE = FULL_ANGLE, EMPTY_ANGLE
+    print(f"[CAL] Reversed direction -> EMPTY={EMPTY_ANGLE:.2f}  FULL={FULL_ANGLE:.2f}\n")
+
 last_line         = None
 angle_history     = []
 low_streak        = 0
@@ -209,7 +219,7 @@ while True:
     edges = preprocess_image(frame)
     
     # FIXED: Tracking structural system anomalies via the new tuple output signature
-    line, anomaly_status, _ = detect_needle(edges)
+    line, anomaly_status, _ = detect_needle(edges, frame)
 
     if anomaly_status == "HEALTHY" and line is not None:
         last_line = line

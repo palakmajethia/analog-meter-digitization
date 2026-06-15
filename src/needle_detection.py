@@ -1,72 +1,117 @@
 import cv2
 import numpy as np
+import math
 from angle_calculation import get_pivot
 
-def detect_needle(edges):
+
+def _hough_candidate(frame, px, py, radius):
     """
-    Warps the circular dial image into a flat linear ribbon using Polar Coordinates.
-    Locates the needle angle via density peak detection and screens for anomalies
-    such as missing needles, severe glare, or physical damage.
-    
-    Returns:
-        tuple: (line_coordinates, status_string, target_angle)
-               line_coordinates: [[x1, y1, x2, y2]] or None if compromised.
-               status_string: "HEALTHY", "MISSING_OR_OBSTRUCTED", or "MULTIPLE_PEAKS_ANOMALY"
-               target_angle: Integer angle (0-359) or None.
+    Grayscale Canny + HoughLinesP candidate. Works regardless of needle
+    color/saturation. Returns (angle_deg_0_359, line_coords) or (None, None).
+    Picks the detected line segment closest to passing through the pivot,
+    with length as a tiebreaker.
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges_gray = cv2.Canny(blur, 50, 150)
+
+    lines = cv2.HoughLinesP(
+        edges_gray, 1, np.pi / 180,
+        threshold=40, minLineLength=int(radius * 0.3), maxLineGap=10
+    )
+    if lines is None:
+        return None, None
+
+    best_line = None
+    best_score = None
+
+    for l in lines:
+        x1, y1, x2, y2 = l[0]
+
+        dx, dy = x2 - x1, y2 - y1
+        seg_len = math.hypot(dx, dy)
+        if seg_len < 1e-6:
+            continue
+
+        dist = abs((px - x1) * dy - (py - y1) * dx) / seg_len
+
+        if dist > radius * 0.20:
+            continue
+
+        score = (dist, -seg_len)
+        if best_score is None or score < best_score:
+            best_score = score
+            best_line = (x1, y1, x2, y2)
+
+    if best_line is None:
+        return None, None
+
+    x1, y1, x2, y2 = best_line
+    d1 = (x1 - px) ** 2 + (y1 - py) ** 2
+    d2 = (x2 - px) ** 2 + (y2 - py) ** 2
+    tx, ty = (x1, y1) if d1 > d2 else (x2, y2)
+
+    dx, dy = tx - px, ty - py
+    ang = math.degrees(math.atan2(-dy, dx)) % 360
+
+    return int(ang), [[px, py, tx, ty]]
+
+
+def detect_needle(edges, frame=None):
+    """
+    Combines two candidates:
+      A) Polar-warp density peak on `edges` (original saturation-based method)
+      B) Canny + HoughLinesP on grayscale `frame` (color-agnostic, fallback only)
+
+    Saturation is the primary path (kept as-is). Hough is used ONLY when
+    saturation fails to find anything, as a color-agnostic fallback.
+    `frame` is optional for backward compatibility.
     """
     h, w = edges.shape
-    
-    # 1. Fetch the center pivot coordinates from the angle_calculation module
     px, py = get_pivot((h, w))
-    
-    # 2. Set search radius footprint for the 800x600 gauge display canvas
-    radius = 240 
-    
-    # 3. Warp the circular image into an unrolled rectangular matrix (360 rows x 240 cols)
+    radius = 240
+
     flags = cv2.WARP_POLAR_LINEAR + cv2.INTER_CUBIC
     unrolled = cv2.warpPolar(edges, (radius, 360), (int(px), int(py)), radius, flags)
-    
-    # 4. Slice columns to look only between 15% and 92% of the radius distance.
-    # Blinds detector to central pivot assembly and outer background text elements/rim borders.
+
     start_col = int(radius * 0.15)
     end_col = int(radius * 0.92)
     row_sums = np.sum(unrolled[:, start_col:end_col], axis=1).astype(np.float32)
-    
-    # 5. Apply 1D Gaussian Smoothing to eliminate high-frequency edge jitter
-    # This ensures we find the true structural "center of mass" of the needle.
     row_sums = cv2.GaussianBlur(row_sums, (1, 11), 0).flatten()
-    
-    # 6. ANOMALY DETECTION: Signal-to-Noise Ratio (SNR) Check
+
     mean_density = np.mean(row_sums)
     max_density = np.max(row_sums)
-    
-    # Threshold: If peak is flat or buried in noise, needle is likely missing or covered
-    if max_density < (mean_density * 2.5) or max_density < 100:
+
+    sat_ok = not (max_density < (mean_density * 2.5) or max_density < 100)
+    sat_angle = int(np.argmax(row_sums)) if sat_ok else None
+
+    hough_angle, hough_line = (None, None)
+    if frame is not None:
+        hough_angle, hough_line = _hough_candidate(frame, px, py, radius)
+        print(f"[DEBUG] sat_ok={sat_ok} sat_angle={sat_angle} hough_angle={hough_angle} max_density={max_density:.1f} mean_density={mean_density:.1f}")
+
+    if not sat_ok and hough_angle is None:
         return None, "MISSING_OR_OBSTRUCTED", None
 
-    # 7. Extract target angle peak
-    target_angle = int(np.argmax(row_sums))
-    
-    # 8. ANOMALY DETECTION: Multi-Peak / Conflict Detection (e.g., Glass Crack or Glare)
-    # Find all angles holding at least 75% of the primary peak's mass
+    if sat_ok:
+        target_angle = sat_angle
+    else:
+        # Saturation failed but Hough found something -> use it as fallback
+        return hough_line, "HEALTHY", hough_angle
+
     significant_peaks = np.where(row_sums > (max_density * 0.75))[0]
-    
     if len(significant_peaks) > 0:
         peak_spread = np.max(significant_peaks) - np.min(significant_peaks)
-        # Handle 360-degree wrap-around boundaries cleanly
         if 350 in significant_peaks and 0 in significant_peaks:
             wrapped_peaks = [(p if p < 180 else p - 360) for p in significant_peaks]
             peak_spread = np.max(wrapped_peaks) - np.min(wrapped_peaks)
-            
-        # If wide spread, there are competing linear shapes (like a crack or distinct shadow)
-        if peak_spread > 15:
+        if peak_spread > 40:
             return None, "MULTIPLE_PEAKS_ANOMALY", target_angle
 
-    # 9. Reconstruct absolute Cartesian endpoints originating from pivot hub
     angle_rad = np.radians(target_angle)
     length = 220
     x1, y1 = int(px), int(py)
     x2 = int(px + length * np.cos(angle_rad))
     y2 = int(py + length * np.sin(angle_rad))
-    
+
     return [[x1, y1, x2, y2]], "HEALTHY", target_angle
