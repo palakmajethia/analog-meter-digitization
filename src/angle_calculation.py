@@ -31,7 +31,7 @@ def calculate_tip_angle(line, frame_shape):
     tx, ty = (x1, y1) if d1 > d2 else (x2, y2)
 
     dx = tx - cx
-    dy = cy - ty       # invert Y → standard Cartesian (up = positive)
+    dy = cy - ty      # invert Y → standard Cartesian (up = positive)
 
     angle = math.degrees(math.atan2(dy, dx))
 

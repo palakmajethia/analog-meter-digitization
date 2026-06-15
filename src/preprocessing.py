@@ -2,22 +2,27 @@ import cv2
 import numpy as np
 
 def preprocess_image(frame):
-    # 1. Convert to HSV color space
+    """
+    Universal Color-Agnostic Filter.
+    Extracts high-saturation elements (the needle) while ignoring
+    monochromatic elements (white ticks, black background, gray shadows).
+    """
+    # 1. Convert BGR to HSV
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     
-    # 2. Capture the red color bounds
-    lower_red1 = np.array([0, 70, 50])
-    upper_red1 = np.array([10, 255, 255])
-    lower_red2 = np.array([170, 70, 50])
-    upper_red2 = np.array([180, 255, 255])
+    # 2. Extract ONLY the Saturation channel (Index 1)
+    # Hue (0) is the specific color. Value (2) is the brightness.
+    # Saturation (1) is simply "How colorful is this pixel?"
+    saturation_channel = hsv[:, :, 1]
     
-    mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
-    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
-    red_mask = cv2.bitwise_or(mask1, mask2)
+    # 3. Apply a simple binary threshold.
+    # Any pixel with a saturation score above 80 (out of 255) becomes pure white.
+    # Monochromatic ticks/backgrounds (score ~0) become pure black.
+    _, thresh = cv2.threshold(saturation_channel, 80, 255, cv2.THRESH_BINARY)
     
-    # Clean up small noise/specks using a morphological open
+    # 4. Clean up stray noise using Morphological Opening
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    cleaned_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)
+    clean_mask = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
     
-    # Return cleaned mask as the "edges" layer
-    return None, None, cleaned_mask
+    # Return the clean 2D matrix for the polar detector
+    return clean_mask
