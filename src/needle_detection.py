@@ -16,26 +16,22 @@ def _hough_candidate(frame, px, py, radius):
     if lines is None:
         return None, None
 
-    best_line = None
+    best_line  = None
     best_score = None
 
     for l in lines:
         x1, y1, x2, y2 = l[0]
-
-        dx, dy = x2 - x1, y2 - y1
+        dx, dy  = x2 - x1, y2 - y1
         seg_len = math.hypot(dx, dy)
         if seg_len < 1e-6:
             continue
-
         dist = abs((px - x1) * dy - (py - y1) * dx) / seg_len
-
         if dist > radius * 0.20:
             continue
-
         score = (dist, -seg_len)
         if best_score is None or score < best_score:
             best_score = score
-            best_line = (x1, y1, x2, y2)
+            best_line  = (x1, y1, x2, y2)
 
     if best_line is None:
         return None, None
@@ -51,23 +47,33 @@ def _hough_candidate(frame, px, py, radius):
     return int(ang), [[px, py, tx, ty]]
 
 
-def detect_needle(edges, frame=None):
+def detect_needle(edges, frame=None, dial_radius=None):
+    """
+    Combines saturation-based polar warp detection (primary) with
+    Hough line fallback (color-agnostic).
+
+    dial_radius: detected dial radius in pixels. Falls back to 240 if None.
+    """
     h, w = edges.shape
     px, py = get_pivot((h, w))
-    radius = 240
 
-    flags = cv2.WARP_POLAR_LINEAR + cv2.INTER_CUBIC
+    # Use detected radius if provided, otherwise fall back to hardcoded default
+    radius = dial_radius if dial_radius is not None else 240
+    # Needle length slightly shorter than radius to stay inside dial face
+    length = int(radius * 0.92)
+
+    flags    = cv2.WARP_POLAR_LINEAR + cv2.INTER_CUBIC
     unrolled = cv2.warpPolar(edges, (radius, 360), (int(px), int(py)), radius, flags)
 
     start_col = int(radius * 0.15)
-    end_col = int(radius * 0.92)
-    row_sums = np.sum(unrolled[:, start_col:end_col], axis=1).astype(np.float32)
-    row_sums = cv2.GaussianBlur(row_sums, (1, 11), 0).flatten()
+    end_col   = int(radius * 0.92)
+    row_sums  = np.sum(unrolled[:, start_col:end_col], axis=1).astype(np.float32)
+    row_sums  = cv2.GaussianBlur(row_sums, (1, 11), 0).flatten()
 
     mean_density = np.mean(row_sums)
-    max_density = np.max(row_sums)
+    max_density  = np.max(row_sums)
 
-    sat_ok = not (max_density < (mean_density * 2.5) or max_density < 100)
+    sat_ok    = not (max_density < (mean_density * 2.5) or max_density < 100)
     sat_angle = int(np.argmax(row_sums)) if sat_ok else None
 
     hough_angle, hough_line = (None, None)
@@ -87,13 +93,12 @@ def detect_needle(edges, frame=None):
         peak_spread = np.max(significant_peaks) - np.min(significant_peaks)
         if 350 in significant_peaks and 0 in significant_peaks:
             wrapped_peaks = [(p if p < 180 else p - 360) for p in significant_peaks]
-            peak_spread = np.max(wrapped_peaks) - np.min(wrapped_peaks)
+            peak_spread   = np.max(wrapped_peaks) - np.min(wrapped_peaks)
         if peak_spread > 40:
             return None, "MULTIPLE_PEAKS_ANOMALY", target_angle
 
     angle_rad = np.radians(target_angle)
-    length = 220
-    x1, y1 = int(px), int(py)
+    x1, y1   = int(px), int(py)
     x2 = int(px + length * np.cos(angle_rad))
     y2 = int(py + length * np.sin(angle_rad))
 

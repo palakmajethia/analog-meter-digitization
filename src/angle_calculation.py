@@ -1,3 +1,4 @@
+import cv2
 import math
 import numpy as np
 
@@ -7,7 +8,54 @@ def get_pivot(frame_shape):
     return w // 2, int(h * 0.75)
 
 
+def detect_dial_radius(frame, pivot=None):
+    """
+    Detects the dial radius by finding the largest circle in the frame
+    using Hough circle detection on a grayscale image.
+
+    Falls back to a default radius (240 for 800x600) if detection fails.
+
+    Returns: (radius_px, pivot_xy)
+    - radius_px: detected radius in pixels
+    - pivot_xy: centre of the detected circle (overrides get_pivot if found)
+    """
+    h, w = frame.shape[:2]
+    default_radius = int(min(h, w) * 0.40)  # ~40% of smaller dimension
+    default_pivot  = get_pivot(frame.shape) if pivot is None else pivot
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (9, 9), 2)
+
+    circles = cv2.HoughCircles(
+        blur,
+        cv2.HOUGH_GRADIENT,
+        dp=1.2,
+        minDist=int(min(h, w) * 0.3),
+        param1=80,
+        param2=40,
+        minRadius=int(min(h, w) * 0.15),
+        maxRadius=int(min(h, w) * 0.55)
+    )
+
+    if circles is None:
+        print(f"[CAL] Dial radius: detection failed, using fallback {default_radius}px")
+        return default_radius, default_pivot
+
+    circles = np.round(circles[0, :]).astype(int)
+    # Pick the largest detected circle
+    cx, cy, r = max(circles, key=lambda c: c[2])
+
+    print(f"[CAL] Dial radius: detected {r}px at centre ({cx},{cy})  "
+          f"[fallback was {default_radius}px at {default_pivot}]")
+
+    return int(r), (int(cx), int(cy))
+
+
 def detect_pivot_from_lines(lines, frame_shape, fallback=None):
+    """
+    Estimates the pivot point as the least-squares intersection of all
+    needle line segments collected during calibration.
+    """
     if fallback is None:
         fallback = get_pivot(frame_shape)
 
