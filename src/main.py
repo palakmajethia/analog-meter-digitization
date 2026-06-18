@@ -4,7 +4,8 @@ import math
 
 from preprocessing     import preprocess_image
 from needle_detection  import detect_needle
-from angle_calculation import calculate_tip_angle, get_pivot, detect_pivot_from_lines, detect_dial_radius
+from angle_calculation import (calculate_tip_angle, get_pivot,
+                                detect_pivot_from_lines, detect_dial_radius)
 from gauge_mapping     import angle_to_percent, calibrate_from_angles
 from alert_logic       import classify_range, get_interval
 
@@ -21,15 +22,17 @@ def calibrate(cap):
     all_lines    = []
     frame_idx    = 0
 
-    # Detect dial radius from the very first frame
+    # Step 1: detect dial radius from the first frame
     ret, first_frame = cap.read()
     if ret:
-        first_frame  = cv2.resize(first_frame, (800, 600))
-        DIAL_RADIUS, _ = detect_dial_radius(first_frame)
+        first_frame = cv2.resize(first_frame, (800, 600))
+        DIAL_RADIUS, circle_pivot = detect_dial_radius(first_frame)
     else:
-        DIAL_RADIUS = 240
+        DIAL_RADIUS   = 240
+        circle_pivot  = get_pivot((600, 800))
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
+    # Step 2: scan every 3rd frame to collect needle angles + lines
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -39,6 +42,8 @@ def calibrate(cap):
             edges = preprocess_image(frame)
             line, status, _ = detect_needle(edges, frame, dial_radius=DIAL_RADIUS)
             if status == "HEALTHY" and line is not None:
+                # Use hardcoded pivot for now during scan;
+                # we'll compute the real pivot after collecting all lines
                 all_angles.append(calculate_tip_angle(line, frame.shape))
                 all_lines.append(line)
         frame_idx += 1
@@ -47,26 +52,39 @@ def calibrate(cap):
 
     if not all_angles:
         print("[ERROR] Calibration failed: No healthy needle signatures found.")
-        return 0, 360, DIAL_RADIUS
+        return 0, 360, DIAL_RADIUS, get_pivot((600, 800))
 
-    p5_angle, p95_angle = calibrate_from_angles(all_angles)
+    # Step 3: compute real pivot from collected line intersections
+    frame_shape   = (600, 800)
+    line_pivot    = detect_pivot_from_lines(all_lines, frame_shape,
+                                            fallback=get_pivot(frame_shape))
 
-    first_angle = all_angles[0]
+    print(f"[CAL] Pivot from line intersection: {line_pivot}")
+    print(f"[CAL] Pivot from circle detection:  {circle_pivot}")
+    print(f"[CAL] Hardcoded pivot:              {get_pivot(frame_shape)}")
+
+    # Use line-intersection pivot as primary (more accurate for needle base)
+    PIVOT = line_pivot
+
+    # Step 4: recompute all angles using the real pivot
+    all_angles_real = []
+    for line in all_lines:
+        all_angles_real.append(calculate_tip_angle(line, frame_shape, pivot=PIVOT))
+
+    # Step 5: calibrate range from real angles
+    p5_angle, p95_angle = calibrate_from_angles(all_angles_real)
+
+    first_angle = all_angles_real[0]
     if abs(first_angle - p5_angle) < abs(first_angle - p95_angle):
         empty_angle, full_angle = p5_angle, p95_angle
     else:
         empty_angle, full_angle = p95_angle, p5_angle
 
-    print(f"[CAL] Scanned {len(all_angles)} readings from {total_frames} frames.")
+    print(f"[CAL] Scanned {len(all_angles_real)} readings from {total_frames} frames.")
     print(f"[CAL] EMPTY = {empty_angle:.2f} deg  |  FULL = {full_angle:.2f} deg")
-    print(f"[CAL] Dial radius used: {DIAL_RADIUS}px")
+    print(f"[CAL] Dial radius: {DIAL_RADIUS}px")
 
-    detected_pivot  = detect_pivot_from_lines(all_lines, (600, 800))
-    hardcoded_pivot = get_pivot((600, 800))
-    print(f"[CAL] Detected pivot:  {detected_pivot}")
-    print(f"[CAL] Hardcoded pivot: {hardcoded_pivot}")
-
-    return empty_angle, full_angle, DIAL_RADIUS
+    return empty_angle, full_angle, DIAL_RADIUS, PIVOT
 
 
 # =========================
@@ -180,8 +198,9 @@ if not cap.isOpened():
     exit()
 
 print("[CAL] Starting auto-calibration (full video scan)...")
-EMPTY_ANGLE, FULL_ANGLE, DIAL_RADIUS = calibrate(cap)
-print(f"[CAL] Done.  EMPTY={EMPTY_ANGLE:.2f}  FULL={FULL_ANGLE:.2f}  RADIUS={DIAL_RADIUS}px\n")
+EMPTY_ANGLE, FULL_ANGLE, DIAL_RADIUS, PIVOT = calibrate(cap)
+print(f"[CAL] Done.  EMPTY={EMPTY_ANGLE:.2f}  FULL={FULL_ANGLE:.2f}  "
+      f"RADIUS={DIAL_RADIUS}px  PIVOT={PIVOT}\n")
 
 REVERSE_GAUGE_DIRECTION = True
 if REVERSE_GAUGE_DIRECTION:
@@ -204,13 +223,13 @@ while True:
     line, anomaly_status, _ = detect_needle(edges, frame, dial_radius=DIAL_RADIUS)
 
     if anomaly_status == "HEALTHY" and line is not None:
-        last_line = line
-        angle     = calculate_tip_angle(line, frame.shape)
+        last_line    = line
+        angle        = calculate_tip_angle(line, frame.shape, pivot=PIVOT)
         angle_history.append(angle)
         if len(angle_history) > 10:
             angle_history.pop(0)
-        smooth_angle = float(np.mean(angle_history))
-        percent      = angle_to_percent(smooth_angle, EMPTY_ANGLE, FULL_ANGLE)
+        smooth_angle  = float(np.mean(angle_history))
+        percent       = angle_to_percent(smooth_angle, EMPTY_ANGLE, FULL_ANGLE)
         is_stale_data = False
     else:
         is_stale_data = True
@@ -221,7 +240,8 @@ while True:
             smooth_angle = EMPTY_ANGLE
             percent      = 0.0
 
-    active_render_line = line if (anomaly_status == "HEALTHY" and line is not None) else last_line
+    active_render_line = (line if (anomaly_status == "HEALTHY" and line is not None)
+                          else last_line)
 
     if active_render_line is None:
         cv2.putText(frame, f"ANOMALY: {anomaly_status}",
@@ -233,7 +253,7 @@ while True:
         continue
 
     x1, y1, x2, y2 = active_render_line[0]
-    px, py = get_pivot(frame.shape)
+    px, py = int(PIVOT[0]), int(PIVOT[1])
     d1 = (x1 - px) ** 2 + (y1 - py) ** 2
     d2 = (x2 - px) ** 2 + (y2 - py) ** 2
     tx, ty = (x1, y1) if d1 > d2 else (x2, y2)

@@ -12,15 +12,10 @@ def detect_dial_radius(frame, pivot=None):
     """
     Detects the dial radius by finding the largest circle in the frame
     using Hough circle detection on a grayscale image.
-
-    Falls back to a default radius (240 for 800x600) if detection fails.
-
     Returns: (radius_px, pivot_xy)
-    - radius_px: detected radius in pixels
-    - pivot_xy: centre of the detected circle (overrides get_pivot if found)
     """
     h, w = frame.shape[:2]
-    default_radius = int(min(h, w) * 0.40)  # ~40% of smaller dimension
+    default_radius = int(min(h, w) * 0.40)
     default_pivot  = get_pivot(frame.shape) if pivot is None else pivot
 
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -42,7 +37,6 @@ def detect_dial_radius(frame, pivot=None):
         return default_radius, default_pivot
 
     circles = np.round(circles[0, :]).astype(int)
-    # Pick the largest detected circle
     cx, cy, r = max(circles, key=lambda c: c[2])
 
     print(f"[CAL] Dial radius: detected {r}px at centre ({cx},{cy})  "
@@ -94,19 +88,32 @@ def detect_pivot_from_lines(lines, frame_shape, fallback=None):
     return (px, py)
 
 
-def calculate_tip_angle(line, frame_shape):
+def calculate_tip_angle(line, frame_shape, pivot=None):
+    """
+    Returns the needle tip angle using the given pivot.
+    Reflects into 0-180 range (upper semicircle) for standard bottom-pivot gauges.
+    Pivot is now a calibration parameter rather than hardcoded.
+    """
     x1, y1, x2, y2 = line[0]
-    cx, cy = get_pivot(frame_shape)
+
+    if pivot is None:
+        cx, cy = get_pivot(frame_shape)
+    else:
+        cx, cy = pivot
 
     d1 = (x1 - cx) ** 2 + (y1 - cy) ** 2
     d2 = (x2 - cx) ** 2 + (y2 - cy) ** 2
     tx, ty = (x1, y1) if d1 > d2 else (x2, y2)
 
     dx = tx - cx
-    dy = cy - ty
+    dy = cy - ty   # invert Y → standard Cartesian
 
     angle = math.degrees(math.atan2(dy, dx))
 
+    # Reflect lower half into upper half (0-180) for semicircular gauges
+    # This assumption holds when pivot is at bottom of dial
+    # Item 4 remaining work: detect orientation and skip reflection for
+    # 270° or 360° gauges where pivot is not at bottom
     if angle < 0:
         angle = -angle
 
