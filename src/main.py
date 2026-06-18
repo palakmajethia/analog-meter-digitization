@@ -28,11 +28,11 @@ def calibrate(cap):
         first_frame = cv2.resize(first_frame, (800, 600))
         DIAL_RADIUS, circle_pivot = detect_dial_radius(first_frame)
     else:
-        DIAL_RADIUS   = 240
-        circle_pivot  = get_pivot((600, 800))
+        DIAL_RADIUS  = 240
+        circle_pivot = get_pivot((600, 800))
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-    # Step 2: scan every 3rd frame to collect needle angles + lines
+    # Step 2: scan every 3rd frame
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -42,8 +42,6 @@ def calibrate(cap):
             edges = preprocess_image(frame)
             line, status, _ = detect_needle(edges, frame, dial_radius=DIAL_RADIUS)
             if status == "HEALTHY" and line is not None:
-                # Use hardcoded pivot for now during scan;
-                # we'll compute the real pivot after collecting all lines
                 all_angles.append(calculate_tip_angle(line, frame.shape))
                 all_lines.append(line)
         frame_idx += 1
@@ -54,37 +52,61 @@ def calibrate(cap):
         print("[ERROR] Calibration failed: No healthy needle signatures found.")
         return 0, 360, DIAL_RADIUS, get_pivot((600, 800))
 
-    # Step 3: compute real pivot from collected line intersections
-    frame_shape   = (600, 800)
-    line_pivot    = detect_pivot_from_lines(all_lines, frame_shape,
-                                            fallback=get_pivot(frame_shape))
-
-    print(f"[CAL] Pivot from line intersection: {line_pivot}")
+    # Step 3: compute real pivot
+    frame_shape = (600, 800)
+    PIVOT       = detect_pivot_from_lines(all_lines, frame_shape,
+                                          fallback=get_pivot(frame_shape))
+    print(f"[CAL] Pivot from line intersection: {PIVOT}")
     print(f"[CAL] Pivot from circle detection:  {circle_pivot}")
-    print(f"[CAL] Hardcoded pivot:              {get_pivot(frame_shape)}")
 
-    # Use line-intersection pivot as primary (more accurate for needle base)
-    PIVOT = line_pivot
+    # Step 4: recompute angles with real pivot
+    all_angles_real = [calculate_tip_angle(l, frame_shape, pivot=PIVOT)
+                       for l in all_lines]
 
-    # Step 4: recompute all angles using the real pivot
-    all_angles_real = []
-    for line in all_lines:
-        all_angles_real.append(calculate_tip_angle(line, frame_shape, pivot=PIVOT))
-
-    # Step 5: calibrate range from real angles
+    # Step 5: get calibrated range
     p5_angle, p95_angle = calibrate_from_angles(all_angles_real)
 
-    first_angle = all_angles_real[0]
-    if abs(first_angle - p5_angle) < abs(first_angle - p95_angle):
-        empty_angle, full_angle = p5_angle, p95_angle
-    else:
-        empty_angle, full_angle = p95_angle, p5_angle
+    # Step 6: AUTO DIRECTION DETECTION
+    # Use median of first 10% of readings as the "start" position.
+    # Whichever extreme (p5 or p95) the start is closer to determines
+    # whether the needle moves from low→high or high→low.
+    n_start      = max(1, len(all_angles_real) // 10)
+    start_median = float(np.median(all_angles_real[:n_start]))
+    n_end        = max(1, len(all_angles_real) // 10)
+    end_median   = float(np.median(all_angles_real[-n_end:]))
 
+    dist_start_to_p5  = abs(start_median - p5_angle)
+    dist_start_to_p95 = abs(start_median - p95_angle)
+
+    dist_end_to_p5  = abs(end_median - p5_angle)
+    dist_end_to_p95 = abs(end_median - p95_angle)
+
+    # If start is closer to p5 and end is closer to p95:
+    #   needle sweeps low→high → p5=EMPTY, p95=FULL
+    # If start is closer to p95 and end is closer to p5:
+    #   needle sweeps high→low → p95=EMPTY, p5=FULL
+    if dist_start_to_p5 < dist_start_to_p95:
+        # Video starts near low angle = starts near FULL for this gauge type
+        empty_angle, full_angle = p95_angle, p5_angle
+        direction = "descending (start≈p5=FULL, end≈p95=EMPTY)"
+    else:
+        # Video starts near high angle = starts near EMPTY
+        empty_angle, full_angle = p5_angle, p95_angle
+        direction = "ascending (start≈p95=EMPTY, end≈p5=FULL)"
+
+    print(f"[CAL] Start median: {start_median:.1f}°  End median: {end_median:.1f}°")
+    print(f"[CAL] p5={p5_angle:.1f}°  p95={p95_angle:.1f}°")
+    print(f"[CAL] Auto direction: {direction}")
     print(f"[CAL] Scanned {len(all_angles_real)} readings from {total_frames} frames.")
-    print(f"[CAL] EMPTY = {empty_angle:.2f} deg  |  FULL = {full_angle:.2f} deg")
+    print(f"[CAL] EMPTY = {empty_angle:.2f}°  |  FULL = {full_angle:.2f}°")
     print(f"[CAL] Dial radius: {DIAL_RADIUS}px")
 
     return empty_angle, full_angle, DIAL_RADIUS, PIVOT
+    EMPTY_ANGLE, FULL_ANGLE, DIAL_RADIUS, PIVOT = calibrate(cap)
+    # Swap: our angle_to_percent maps low angle→0%, high angle→100%
+    # But low angle = physical FULL, high angle = physical EMPTY on this gauge
+    EMPTY_ANGLE, FULL_ANGLE = FULL_ANGLE, EMPTY_ANGLE
+    print(f"[CAL] After physical correction: EMPTY={EMPTY_ANGLE:.2f}  FULL={FULL_ANGLE:.2f}\n")
 
 
 # =========================
@@ -119,53 +141,58 @@ def draw_dashboard(percent, smooth_angle, status, empty_angle, full_angle):
     thickness = 18
     font      = cv2.FONT_HERSHEY_SIMPLEX
 
-    def to_oc(a):
-        return (180 + a) % 360
+    # Convert gauge angle (0=right, 90=up, 180=left in standard math)
+    # to OpenCV angle (0=right, 90=DOWN, measured clockwise)
+    def gauge_to_cv(a):
+        return -a  # flip Y axis
 
-    oc_empty  = to_oc(empty_angle)
-    oc_full   = to_oc(full_angle)
-    arc_start = min(oc_empty, oc_full)
-    arc_end   = max(oc_empty, oc_full)
+    cv_empty = gauge_to_cv(empty_angle)
+    cv_full  = gauge_to_cv(full_angle)
 
+    arc_start = min(cv_empty, cv_full)
+    arc_end   = max(cv_empty, cv_full)
+
+    # Background track
     cv2.ellipse(dash, (cx, cy), (radius, radius),
                 0, arc_start, arc_end, C_ARC_TRACK, thickness)
 
+    # Filled arc — grows from EMPTY side toward FULL
     sweep = arc_end - arc_start
     fill  = sweep * (percent / 100.0)
     if fill > 0.5:
-        if oc_empty <= oc_full:
-            cv2.ellipse(dash, (cx, cy), (radius, radius),
-                        0, arc_start, arc_start + fill,
-                        arc_color(percent), thickness)
-        else:
-            cv2.ellipse(dash, (cx, cy), (radius, radius),
-                        0, arc_end - fill, arc_end,
-                        arc_color(percent), thickness)
+        cv2.ellipse(dash, (cx, cy), (radius, radius),
+                    0, arc_start, arc_start + fill,
+                    arc_color(percent), thickness)
 
+    # Needle
     rad        = math.radians(smooth_angle)
     needle_len = radius - thickness - 8
-    nx = int(cx - needle_len * math.cos(rad))
+    # In gauge coords: 0=right, 90=up → cos for x, -sin for y (flip Y)
+    nx = int(cx + needle_len * math.cos(rad))
     ny = int(cy - needle_len * math.sin(rad))
     cv2.line(dash, (cx, cy), (nx, ny), C_NEEDLE, 3, cv2.LINE_AA)
     cv2.circle(dash, (cx, cy), 7, C_NEEDLE, -1)
 
-    def label_pos(our_angle, offset=22):
-        r  = math.radians(our_angle)
-        lx = int(cx - (radius + offset) * math.cos(r))
+    # E / F labels
+    def label_pos(gauge_angle, offset=22):
+        r  = math.radians(gauge_angle)
+        lx = int(cx + (radius + offset) * math.cos(r))
         ly = int(cy - (radius + offset) * math.sin(r))
         return lx, ly
 
     ex, ey = label_pos(empty_angle)
     fx, fy = label_pos(full_angle)
-    cv2.putText(dash, "E", (ex - 8, ey + 6), font, 0.75, C_ARC_ALERT, 2, cv2.LINE_AA)
-    cv2.putText(dash, "F", (fx - 8, fy + 6), font, 0.75, C_ARC_FILL,  2, cv2.LINE_AA)
+    cv2.putText(dash, "F", (ex - 8, ey + 6), font, 0.75, C_ARC_FILL,  2, cv2.LINE_AA)
+    cv2.putText(dash, "E", (fx - 8, fy + 6), font, 0.75, C_ARC_ALERT, 2, cv2.LINE_AA)
 
+    # Percent label
     pct_str = f"{percent:.1f}%"
     (pw, _), _ = cv2.getTextSize(pct_str, font, 1.8, 3)
     cv2.putText(dash, pct_str,
                 (cx - pw // 2, cy - 18),
                 font, 1.8, C_TEXT, 3, cv2.LINE_AA)
 
+    # Status badge
     badge_col = C_ARC_ALERT if status == "LOW ALERT" else C_ARC_FILL
     (bw, bh), _ = cv2.getTextSize(status, font, 0.75, 2)
     pad = 7
@@ -178,6 +205,7 @@ def draw_dashboard(percent, smooth_angle, status, empty_angle, full_angle):
     cv2.putText(dash, status, (bx, by),
                 font, 0.75, (255, 255, 255), 2, cv2.LINE_AA)
 
+    # Title + footer
     cv2.putText(dash, "GAUGE MONITOR",
                 (18, 26), font, 0.65, C_DIM, 1, cv2.LINE_AA)
     info = f"Angle: {smooth_angle:.1f}  |  CAL  E={empty_angle:.0f}  F={full_angle:.0f}"
@@ -202,10 +230,6 @@ EMPTY_ANGLE, FULL_ANGLE, DIAL_RADIUS, PIVOT = calibrate(cap)
 print(f"[CAL] Done.  EMPTY={EMPTY_ANGLE:.2f}  FULL={FULL_ANGLE:.2f}  "
       f"RADIUS={DIAL_RADIUS}px  PIVOT={PIVOT}\n")
 
-REVERSE_GAUGE_DIRECTION = True
-if REVERSE_GAUGE_DIRECTION:
-    EMPTY_ANGLE, FULL_ANGLE = FULL_ANGLE, EMPTY_ANGLE
-    print(f"[CAL] Reversed -> EMPTY={EMPTY_ANGLE:.2f}  FULL={FULL_ANGLE:.2f}\n")
 
 last_line         = None
 angle_history     = []
