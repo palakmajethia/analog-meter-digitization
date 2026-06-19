@@ -6,7 +6,8 @@ from preprocessing     import preprocess_image
 from needle_detection  import detect_needle
 from angle_calculation import (calculate_tip_angle, get_pivot,
                                 detect_pivot_from_lines, detect_dial_radius)
-from gauge_mapping     import angle_to_percent, calibrate_from_angles
+from gauge_mapping     import (angle_to_percent, calibrate_from_angles,
+                                detect_tick_marks, GaugeScale)
 from alert_logic       import classify_range, get_interval
 
 
@@ -22,7 +23,7 @@ def calibrate(cap):
     all_lines    = []
     frame_idx    = 0
 
-    # Step 1: detect dial radius from the first frame
+    # Step 1: detect dial radius from first frame
     ret, first_frame = cap.read()
     if ret:
         first_frame = cv2.resize(first_frame, (800, 600))
@@ -30,6 +31,7 @@ def calibrate(cap):
     else:
         DIAL_RADIUS  = 240
         circle_pivot = get_pivot((600, 800))
+        first_frame  = None
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
     # Step 2: scan every 3rd frame
@@ -40,7 +42,9 @@ def calibrate(cap):
         if frame_idx % 3 == 0:
             frame = cv2.resize(frame, (800, 600))
             edges = preprocess_image(frame)
-            line, status, _ = detect_needle(edges, frame, dial_radius=DIAL_RADIUS, angle_range=None)
+            line, status, _ = detect_needle(edges, frame,
+                                            dial_radius=DIAL_RADIUS,
+                                            angle_range=None)
             if status == "HEALTHY" and line is not None:
                 all_angles.append(calculate_tip_angle(line, frame.shape))
                 all_lines.append(line)
@@ -50,12 +54,12 @@ def calibrate(cap):
 
     if not all_angles:
         print("[ERROR] Calibration failed: No healthy needle signatures found.")
-        return 0, 360, DIAL_RADIUS, get_pivot((600, 800))
+        return 0, 360, DIAL_RADIUS, get_pivot((600, 800)), None
 
-    # Step 3: compute real pivot
+    # Step 3: real pivot from line intersections
     frame_shape = (600, 800)
-    PIVOT       = detect_pivot_from_lines(all_lines, frame_shape,
-                                          fallback=get_pivot(frame_shape))
+    PIVOT = detect_pivot_from_lines(all_lines, frame_shape,
+                                    fallback=get_pivot(frame_shape))
     print(f"[CAL] Pivot from line intersection: {PIVOT}")
     print(f"[CAL] Pivot from circle detection:  {circle_pivot}")
 
@@ -63,50 +67,40 @@ def calibrate(cap):
     all_angles_real = [calculate_tip_angle(l, frame_shape, pivot=PIVOT)
                        for l in all_lines]
 
-    # Step 5: get calibrated range
+    # Step 5: calibrate range
     p5_angle, p95_angle = calibrate_from_angles(all_angles_real)
 
-    # Step 6: AUTO DIRECTION DETECTION
-    # Use median of first 10% of readings as the "start" position.
-    # Whichever extreme (p5 or p95) the start is closer to determines
-    # whether the needle moves from low→high or high→low.
+    # Step 6: auto direction detection
     n_start      = max(1, len(all_angles_real) // 10)
-    start_median = float(np.median(all_angles_real[:n_start]))
     n_end        = max(1, len(all_angles_real) // 10)
+    start_median = float(np.median(all_angles_real[:n_start]))
     end_median   = float(np.median(all_angles_real[-n_end:]))
-
-    dist_start_to_p5  = abs(start_median - p5_angle)
-    dist_start_to_p95 = abs(start_median - p95_angle)
-
-    dist_end_to_p5  = abs(end_median - p5_angle)
-    dist_end_to_p95 = abs(end_median - p95_angle)
-
-    # If start is closer to p5 and end is closer to p95:
-    #   needle sweeps low→high → p5=EMPTY, p95=FULL
-    # If start is closer to p95 and end is closer to p5:
-    #   needle sweeps high→low → p95=EMPTY, p5=FULL
-    if dist_start_to_p5 < dist_start_to_p95:
-        # Video starts near low angle = starts near FULL for this gauge type
-        empty_angle, full_angle = p95_angle, p5_angle
-        direction = "descending (start≈p5=FULL, end≈p95=EMPTY)"
-    else:
-        # Video starts near high angle = starts near EMPTY
-        empty_angle, full_angle = p5_angle, p95_angle
-        direction = "ascending (start≈p95=EMPTY, end≈p5=FULL)"
 
     print(f"[CAL] Start median: {start_median:.1f}°  End median: {end_median:.1f}°")
     print(f"[CAL] p5={p5_angle:.1f}°  p95={p95_angle:.1f}°")
+
+    dist_start_p5  = abs(start_median - p5_angle)
+    dist_start_p95 = abs(start_median - p95_angle)
+
+    if dist_start_p5 < dist_start_p95:
+        empty_angle, full_angle = p95_angle, p5_angle
+        direction = "descending (start≈p5=FULL, end≈p95=EMPTY)"
+    else:
+        empty_angle, full_angle = p5_angle, p95_angle
+        direction = "ascending (start≈p95=EMPTY, end≈p5=FULL)"
+
     print(f"[CAL] Auto direction: {direction}")
     print(f"[CAL] Scanned {len(all_angles_real)} readings from {total_frames} frames.")
     print(f"[CAL] EMPTY = {empty_angle:.2f}°  |  FULL = {full_angle:.2f}°")
     print(f"[CAL] Dial radius: {DIAL_RADIUS}px")
 
-    return empty_angle, full_angle, DIAL_RADIUS, PIVOT
-    EMPTY_ANGLE, FULL_ANGLE, DIAL_RADIUS, PIVOT = calibrate(cap)
-    # Swap: our angle_to_percent maps low angle→0%, high angle→100%
-    # But low angle = physical FULL, high angle = physical EMPTY on this gauge
-    EMPTY_ANGLE, FULL_ANGLE = FULL_ANGLE, EMPTY_ANGLE
-    print(f"[CAL] After physical correction: EMPTY={EMPTY_ANGLE:.2f}  FULL={FULL_ANGLE:.2f}\n")
+    # Step 7: ITEM 6 — OCR tick marks from first frame
+    tick_map = []
+    if first_frame is not None:
+        print("[OCR] Scanning first frame for tick mark labels...")
+        tick_map = detect_tick_marks(first_frame, PIVOT, DIAL_RADIUS, DIAL_RADIUS)
+
+    return empty_angle, full_angle, DIAL_RADIUS, PIVOT, tick_map
 
 
 # =========================
@@ -133,7 +127,8 @@ def arc_color(percent):
     return C_ARC_FILL
 
 
-def draw_dashboard(percent, smooth_angle, status, empty_angle, full_angle):
+def draw_dashboard(percent, smooth_angle, status, empty_angle, full_angle,
+                   physical_value=None, unit_type='percent'):
     dash = np.full((DASH_H, DASH_W, 3), C_BG, dtype=np.uint8)
 
     cx, cy    = DASH_W // 2, 235
@@ -141,22 +136,17 @@ def draw_dashboard(percent, smooth_angle, status, empty_angle, full_angle):
     thickness = 18
     font      = cv2.FONT_HERSHEY_SIMPLEX
 
-    # Convert gauge angle (0=right, 90=up, 180=left in standard math)
-    # to OpenCV angle (0=right, 90=DOWN, measured clockwise)
     def gauge_to_cv(a):
-        return -a  # flip Y axis
+        return -a
 
-    cv_empty = gauge_to_cv(empty_angle)
-    cv_full  = gauge_to_cv(full_angle)
-
+    cv_empty  = gauge_to_cv(empty_angle)
+    cv_full   = gauge_to_cv(full_angle)
     arc_start = min(cv_empty, cv_full)
     arc_end   = max(cv_empty, cv_full)
 
-    # Background track
     cv2.ellipse(dash, (cx, cy), (radius, radius),
                 0, arc_start, arc_end, C_ARC_TRACK, thickness)
 
-    # Filled arc — grows from EMPTY side toward FULL
     sweep = arc_end - arc_start
     fill  = sweep * (percent / 100.0)
     if fill > 0.5:
@@ -164,16 +154,13 @@ def draw_dashboard(percent, smooth_angle, status, empty_angle, full_angle):
                     0, arc_start, arc_start + fill,
                     arc_color(percent), thickness)
 
-    # Needle
     rad        = math.radians(smooth_angle)
     needle_len = radius - thickness - 8
-    # In gauge coords: 0=right, 90=up → cos for x, -sin for y (flip Y)
     nx = int(cx + needle_len * math.cos(rad))
     ny = int(cy - needle_len * math.sin(rad))
     cv2.line(dash, (cx, cy), (nx, ny), C_NEEDLE, 3, cv2.LINE_AA)
     cv2.circle(dash, (cx, cy), 7, C_NEEDLE, -1)
 
-    # E / F labels
     def label_pos(gauge_angle, offset=22):
         r  = math.radians(gauge_angle)
         lx = int(cx + (radius + offset) * math.cos(r))
@@ -182,17 +169,20 @@ def draw_dashboard(percent, smooth_angle, status, empty_angle, full_angle):
 
     ex, ey = label_pos(empty_angle)
     fx, fy = label_pos(full_angle)
-    cv2.putText(dash, "E", (ex - 8, ey + 6), font, 0.75, C_ARC_FILL,  2, cv2.LINE_AA)
-    cv2.putText(dash, "F", (fx - 8, fy + 6), font, 0.75, C_ARC_ALERT, 2, cv2.LINE_AA)
+    cv2.putText(dash, "F", (ex - 8, ey + 6), font, 0.75, C_ARC_FILL,  2, cv2.LINE_AA)
+    cv2.putText(dash, "E", (fx - 8, fy + 6), font, 0.75, C_ARC_ALERT, 2, cv2.LINE_AA)
 
-    # Percent label
-    pct_str = f"{percent:.1f}%"
-    (pw, _), _ = cv2.getTextSize(pct_str, font, 1.8, 3)
-    cv2.putText(dash, pct_str,
+    # Show physical value if OCR found a scale, else show percent
+    if unit_type == 'physical' and physical_value is not None:
+        val_str = f"{physical_value}"
+    else:
+        val_str = f"{percent:.1f}%"
+
+    (pw, _), _ = cv2.getTextSize(val_str, font, 1.8, 3)
+    cv2.putText(dash, val_str,
                 (cx - pw // 2, cy - 18),
                 font, 1.8, C_TEXT, 3, cv2.LINE_AA)
 
-    # Status badge
     badge_col = C_ARC_ALERT if status == "LOW ALERT" else C_ARC_FILL
     (bw, bh), _ = cv2.getTextSize(status, font, 0.75, 2)
     pad = 7
@@ -205,10 +195,12 @@ def draw_dashboard(percent, smooth_angle, status, empty_angle, full_angle):
     cv2.putText(dash, status, (bx, by),
                 font, 0.75, (255, 255, 255), 2, cv2.LINE_AA)
 
-    # Title + footer
     cv2.putText(dash, "GAUGE MONITOR",
                 (18, 26), font, 0.65, C_DIM, 1, cv2.LINE_AA)
-    info = f"Angle: {smooth_angle:.1f}  |  CAL  E={empty_angle:.0f}  F={full_angle:.0f}"
+
+    scale_type = "OCR" if unit_type == 'physical' else "LINEAR"
+    info = (f"Angle: {smooth_angle:.1f}  |  "
+            f"E={empty_angle:.0f} F={full_angle:.0f}  [{scale_type}]")
     cv2.putText(dash, info,
                 (14, DASH_H - 10), font, 0.42, C_DIM, 1, cv2.LINE_AA)
 
@@ -226,10 +218,12 @@ if not cap.isOpened():
     exit()
 
 print("[CAL] Starting auto-calibration (full video scan)...")
-EMPTY_ANGLE, FULL_ANGLE, DIAL_RADIUS, PIVOT = calibrate(cap)
+EMPTY_ANGLE, FULL_ANGLE, DIAL_RADIUS, PIVOT, TICK_MAP = calibrate(cap)
 print(f"[CAL] Done.  EMPTY={EMPTY_ANGLE:.2f}  FULL={FULL_ANGLE:.2f}  "
-      f"RADIUS={DIAL_RADIUS}px  PIVOT={PIVOT}\n")
+      f"RADIUS={DIAL_RADIUS}px\n")
 
+# Build gauge scale (uses OCR tick map if available, else linear)
+SCALE = GaugeScale(EMPTY_ANGLE, FULL_ANGLE, tick_map=TICK_MAP)
 
 last_line         = None
 angle_history     = []
@@ -244,8 +238,11 @@ while True:
 
     frame = cv2.resize(frame, (800, 600))
     edges = preprocess_image(frame)
-    line, anomaly_status, _ = detect_needle(edges, frame, dial_radius=DIAL_RADIUS,
-                                            angle_range=(EMPTY_ANGLE, FULL_ANGLE))
+    line, anomaly_status, _ = detect_needle(
+        edges, frame,
+        dial_radius=DIAL_RADIUS,
+        angle_range=(EMPTY_ANGLE, FULL_ANGLE)
+    )
 
     if anomaly_status == "HEALTHY" and line is not None:
         last_line    = line
@@ -254,16 +251,19 @@ while True:
         if len(angle_history) > 10:
             angle_history.pop(0)
         smooth_angle  = float(np.mean(angle_history))
-        percent       = angle_to_percent(smooth_angle, EMPTY_ANGLE, FULL_ANGLE)
+        percent       = SCALE.to_percent(smooth_angle)
+        phys_val, unit_type = SCALE.angle_to_value(smooth_angle)
         is_stale_data = False
     else:
         is_stale_data = True
         if len(angle_history) > 0:
             smooth_angle = float(np.mean(angle_history))
-            percent      = angle_to_percent(smooth_angle, EMPTY_ANGLE, FULL_ANGLE)
+            percent      = SCALE.to_percent(smooth_angle)
+            phys_val, unit_type = SCALE.angle_to_value(smooth_angle)
         else:
             smooth_angle = EMPTY_ANGLE
             percent      = 0.0
+            phys_val, unit_type = 0.0, 'percent'
 
     active_render_line = (line if (anomaly_status == "HEALTHY" and line is not None)
                           else last_line)
@@ -297,8 +297,15 @@ while True:
 
     lower, upper = get_interval(percent)
     prefix_flag  = f"[STALE - {anomaly_status}]" if is_stale_data else "[FRESH]"
-    print(f"{prefix_flag} Angle: {smooth_angle:.2f} | Percent: {percent:.1f}% | "
-          f"Interval: {lower}-{upper} | Status: {status}")
+
+    if unit_type == 'physical':
+        print(f"{prefix_flag} Angle: {smooth_angle:.2f} | "
+              f"Value: {phys_val} [OCR scale] | "
+              f"Percent: {percent:.1f}% | Status: {status}")
+    else:
+        print(f"{prefix_flag} Angle: {smooth_angle:.2f} | "
+              f"Percent: {percent:.1f}% | "
+              f"Interval: {lower}-{upper} | Status: {status}")
 
     cv2.putText(frame, f"{display_status} | {percent:.1f}%",
                 (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
@@ -306,7 +313,10 @@ while True:
                 (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
 
     dashboard = draw_dashboard(
-        percent, smooth_angle, status, EMPTY_ANGLE, FULL_ANGLE
+        percent, smooth_angle, status,
+        EMPTY_ANGLE, FULL_ANGLE,
+        physical_value=phys_val,
+        unit_type=unit_type
     )
 
     cv2.imshow("Gauge Feed",      frame)
