@@ -40,7 +40,7 @@ def calibrate(cap):
         if frame_idx % 3 == 0:
             frame = cv2.resize(frame, (800, 600))
             edges = preprocess_image(frame)
-            line, status, _ = detect_needle(edges, frame, dial_radius=DIAL_RADIUS)
+            line, status, _ = detect_needle(edges, frame, dial_radius=DIAL_RADIUS, angle_range=None)
             if status == "HEALTHY" and line is not None:
                 all_angles.append(calculate_tip_angle(line, frame.shape))
                 all_lines.append(line)
@@ -182,8 +182,8 @@ def draw_dashboard(percent, smooth_angle, status, empty_angle, full_angle):
 
     ex, ey = label_pos(empty_angle)
     fx, fy = label_pos(full_angle)
-    cv2.putText(dash, "F", (ex - 8, ey + 6), font, 0.75, C_ARC_FILL,  2, cv2.LINE_AA)
-    cv2.putText(dash, "E", (fx - 8, fy + 6), font, 0.75, C_ARC_ALERT, 2, cv2.LINE_AA)
+    cv2.putText(dash, "E", (ex - 8, ey + 6), font, 0.75, C_ARC_FILL,  2, cv2.LINE_AA)
+    cv2.putText(dash, "F", (fx - 8, fy + 6), font, 0.75, C_ARC_ALERT, 2, cv2.LINE_AA)
 
     # Percent label
     pct_str = f"{percent:.1f}%"
@@ -244,7 +244,8 @@ while True:
 
     frame = cv2.resize(frame, (800, 600))
     edges = preprocess_image(frame)
-    line, anomaly_status, _ = detect_needle(edges, frame, dial_radius=DIAL_RADIUS)
+    line, anomaly_status, _ = detect_needle(edges, frame, dial_radius=DIAL_RADIUS,
+                                            angle_range=(EMPTY_ANGLE, FULL_ANGLE))
 
     if anomaly_status == "HEALTHY" and line is not None:
         last_line    = line

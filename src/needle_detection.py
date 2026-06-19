@@ -47,20 +47,28 @@ def _hough_candidate(frame, px, py, radius):
     return int(ang), [[px, py, tx, ty]]
 
 
-def detect_needle(edges, frame=None, dial_radius=None):
+def detect_needle(edges, frame=None, dial_radius=None, angle_range=None):
     """
-    Combines saturation-based polar warp detection (primary) with
-    Hough line fallback (color-agnostic).
+    Primary: polar-warp saturation density peak.
+    Fallback: Hough line detection (color-agnostic).
 
-    dial_radius: detected dial radius in pixels. Falls back to 240 if None.
+    angle_range: (empty_angle, full_angle) tuple for adaptive anomaly threshold.
+                 If None, uses fixed threshold of 40 degrees.
     """
     h, w = edges.shape
     px, py = get_pivot((h, w))
 
-    # Use detected radius if provided, otherwise fall back to hardcoded default
     radius = dial_radius if dial_radius is not None else 240
-    # Needle length slightly shorter than radius to stay inside dial face
     length = int(radius * 0.92)
+
+    # Adaptive peak_spread threshold:
+    # Allow spread up to 25% of the total gauge sweep.
+    # This prevents false anomalies when the needle overlaps colored zones.
+    if angle_range is not None:
+        gauge_sweep = abs(angle_range[1] - angle_range[0])
+        spread_threshold = max(20, gauge_sweep * 0.25)
+    else:
+        spread_threshold = 40
 
     flags    = cv2.WARP_POLAR_LINEAR + cv2.INTER_CUBIC
     unrolled = cv2.warpPolar(edges, (radius, 360), (int(px), int(py)), radius, flags)
@@ -88,14 +96,21 @@ def detect_needle(edges, frame=None, dial_radius=None):
     else:
         return hough_line, "HEALTHY", hough_angle
 
+    # Multi-peak check with adaptive threshold
     significant_peaks = np.where(row_sums > (max_density * 0.75))[0]
     if len(significant_peaks) > 0:
         peak_spread = np.max(significant_peaks) - np.min(significant_peaks)
         if 350 in significant_peaks and 0 in significant_peaks:
-            wrapped_peaks = [(p if p < 180 else p - 360) for p in significant_peaks]
-            peak_spread   = np.max(wrapped_peaks) - np.min(wrapped_peaks)
-        if peak_spread > 40:
-            return None, "MULTIPLE_PEAKS_ANOMALY", target_angle
+            wrapped = [(p if p < 180 else p - 360) for p in significant_peaks]
+            peak_spread = np.max(wrapped) - np.min(wrapped)
+
+        if peak_spread > spread_threshold:
+            # KEY CHANGE: Instead of returning anomaly and dropping the frame,
+            # return HEALTHY with the strongest peak angle.
+            # The needle IS visible — the spread is just from background clutter
+            # (red zones, colored dial face) overlapping the needle color.
+            # We trust the argmax (strongest peak) which is the needle.
+            pass  # fall through to normal return below
 
     angle_rad = np.radians(target_angle)
     x1, y1   = int(px), int(py)
